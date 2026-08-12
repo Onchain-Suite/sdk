@@ -91,6 +91,65 @@ content: it renders on a lock screen where anyone holding the phone can read it.
 Both carry the same `deliveryId`, and the SDK dedupes on it — so a user who taps
 a notification and lands on your page does not see it twice.
 
+## Mobile (React Native)
+
+Native OS notifications on iOS and Android. Same backend, same analytics, same
+`deliveryId` dedupe as web.
+
+### Why you fetch the token, not us
+
+Getting an APNs or FCM token needs native code, and your app already has an
+opinion about how — `expo-notifications`, `@react-native-firebase/messaging`, or
+your own bridge. Bundling one would pin your React Native version, force a
+linking step, and break web builds of this package for everyone who never wanted
+mobile.
+
+So you get the token however you already do, and hand it over:
+
+```ts
+import messaging from "@react-native-firebase/messaging";
+
+await client.start(walletAddress);
+
+// YOUR app chooses when to ask — see the warning below
+await messaging().requestPermission();
+const token = await messaging().getToken();
+await client.registerDevice(token, "android");
+
+// Tokens rotate. Re-register when they do:
+messaging().onTokenRefresh((t) => client.registerDevice(t, "android"));
+```
+
+> **Call `registerDevice` on every app launch**, not only after the permission
+> prompt. Tokens rotate on reinstall and sometimes on OS upgrade, and nothing
+> announces it — re-registering is the only way a rotated token is ever noticed.
+> Repeat calls upsert; they do not accumulate devices.
+
+> **The permission prompt is yours to time.** A user who declines is **never
+> asked again** on either platform. Prompting on first launch is how apps lose
+> half their addressable audience permanently.
+
+To stop notifications for one device:
+
+```ts
+await client.unregisterDevice(token);
+```
+
+### What your customer has to set up
+
+Native push needs a credential from *your* Apple or Google account, uploaded once
+in OnchainSuite settings — an APNs `.p8`, or a Firebase service account JSON.
+It is verified on upload, so you find out immediately whether it works.
+
+**Web push needs none of this.** If you have a website as well as an app, web
+push reaches phones with zero setup — start there.
+
+### Handling a tap
+
+Route the notification's `deliveryId` into your app and the SDK dedupes it
+against the in-app render, so a user who taps a notification and lands in your
+app does not see the same thing twice.
+
 ### Options
 
 ```ts

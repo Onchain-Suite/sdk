@@ -40,6 +40,9 @@ export interface PushRegistration {
   keys: { p256dh: string; auth: string };
 }
 
+/** Mobile platforms that can receive a native OS notification. */
+export type DevicePlatform = "ios" | "android";
+
 /** Interaction types reported back to the server for analytics. */
 export type EventType = "delivered" | "viewed" | "dismissed" | "clicked";
 

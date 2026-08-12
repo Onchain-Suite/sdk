@@ -212,3 +212,81 @@ describe("unsubscribeFromPush", () => {
     expect(await unsubscribeFromPush("/sw.js")).toBeNull();
   });
 });
+
+describe("native device registration", () => {
+  /** A started client with fetch stubbed, so we can assert what is sent. */
+  async function startedClient() {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      const path = String(url);
+      const body = path.includes("challenge")
+        ? { message: "sign me" }
+        : path.includes("verify")
+          ? { token: "session-jwt", wsUrl: "https://api.example/inapp" }
+          : {};
+      return { ok: true, json: async () => body } as never;
+    }) as never;
+
+    const { OnchainSuite } = await import("./index");
+    const socket = {
+      connected: true,
+      on() {},
+      emit() {},
+      connect() {},
+      disconnect() {},
+    };
+    const client = new OnchainSuite("pk_test_x", {
+      apiBaseUrl: "https://api.example",
+      ioClient: () => socket,
+      display: false,
+      push: false,
+      signMessage: async () => "0xsig",
+    });
+    await client.start("0xWALLET");
+    calls.length = 0;
+    return { client, calls };
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends the token, platform and appId with the session token", async () => {
+    const { client, calls } = await startedClient();
+    await client.registerDevice("device-token-123", "ios", "com.example.app");
+
+    const call = calls.find((c) => c.url.includes("/push/device"));
+    expect(JSON.parse(String(call?.init.body))).toEqual({
+      token: "device-token-123",
+      platform: "ios",
+      appId: "com.example.app",
+    });
+    // Same session the socket uses — no second credential type to expire.
+    expect(
+      (call?.init.headers as Record<string, string>).authorization
+    ).toBe("Bearer session-jwt");
+  });
+
+  it("refuses before start(), when there is no session to authenticate with", async () => {
+    const { OnchainSuite } = await import("./index");
+    const client = new OnchainSuite("pk_test_x", { display: false });
+    await expect(client.registerDevice("t", "ios")).rejects.toThrow(/start\(\)/);
+  });
+
+  it("rejects an empty token rather than registering a useless row", async () => {
+    const { client } = await startedClient();
+    await expect(client.registerDevice("   ", "android")).rejects.toThrow(
+      /device token is required/
+    );
+  });
+
+  it("unregisters by token, since a wallet may have several devices", async () => {
+    const { client, calls } = await startedClient();
+    await client.unregisterDevice("device-token-123");
+
+    const call = calls.find((c) => c.url.includes("/inapp/push"));
+    expect(call?.init.method).toBe("DELETE");
+    expect(JSON.parse(String(call?.init.body))).toEqual({
+      token: "device-token-123",
+    });
+  });
+});

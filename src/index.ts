@@ -12,6 +12,7 @@ import type {
   Notification,
   OnchainSuiteOptions,
   PushStatus,
+  DevicePlatform,
 } from "./types.js";
 
 export type {
@@ -21,6 +22,7 @@ export type {
   OnchainSuiteOptions,
   PushStatus,
   PushRegistration,
+  DevicePlatform,
   NotificationActions,
   SignMessageFn,
 } from "./types.js";
@@ -190,6 +192,75 @@ export class OnchainSuite {
     await this.authedPost("/api/v1/inapp/push", { endpoint }, "DELETE").catch(
       (err: unknown) => this.log("push unregister failed", err)
     );
+  }
+
+  /**
+   * Register a mobile device token so this wallet can receive native OS
+   * notifications.
+   *
+   * WHY THE SDK DOES NOT FETCH THE TOKEN ITSELF
+   *
+   * Getting an APNs or FCM token requires native code, and every React Native
+   * app already has an opinion about how — `expo-notifications`,
+   * `@react-native-firebase/messaging`, or a hand-rolled bridge. Bundling one of
+   * them would pin your React Native version, force a linking step, and break
+   * web builds of this package for the majority of users who never wanted
+   * mobile at all.
+   *
+   * So you fetch the token however your app already does, and hand it here.
+   *
+   * ```ts
+   * import messaging from "@react-native-firebase/messaging";
+   *
+   * await messaging().requestPermission();      // YOUR app chooses the moment
+   * const token = await messaging().getToken();
+   * await client.registerDevice(token, "android");
+   *
+   * // Tokens rotate. Re-register whenever that happens:
+   * messaging().onTokenRefresh((t) => client.registerDevice(t, "android"));
+   * ```
+   *
+   * **Call this on every app launch, not only after the permission prompt.**
+   * Tokens rotate on reinstall and sometimes on OS upgrade, and nothing
+   * announces it — re-registering is the only way a rotated token is noticed.
+   * Repeat calls upsert; they do not accumulate devices.
+   *
+   * @param appId your bundle identifier / package name. Optional, but it is
+   *   what lets support tell two of your apps apart.
+   */
+  async registerDevice(
+    token: string,
+    platform: DevicePlatform,
+    appId?: string
+  ): Promise<void> {
+    if (!this.sessionToken) {
+      throw new Error("Call start() before registerDevice()");
+    }
+    const trimmed = String(token ?? "").trim();
+    if (!trimmed) throw new Error("A device token is required");
+
+    await this.authedPost("/api/v1/inapp/push/device", {
+      token: trimmed,
+      platform,
+      appId,
+    });
+    this.log("device registered", platform);
+  }
+
+  /**
+   * Stop sending native notifications to one device.
+   *
+   * Takes the token because the server cannot otherwise know WHICH of a
+   * wallet's devices just opted out — a person may have a phone, a tablet and a
+   * browser all registered.
+   */
+  async unregisterDevice(token: string): Promise<void> {
+    if (!this.sessionToken) return;
+    const trimmed = String(token ?? "").trim();
+    if (!trimmed) return;
+
+    await this.authedPost("/api/v1/inapp/push", { token: trimmed }, "DELETE");
+    this.log("device unregistered");
   }
 
   // --- internals -----------------------------------------------------------

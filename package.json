@@ -1,7 +1,7 @@
 {
   "name": "@onchainsuite/sdk",
-  "version": "0.2.0",
-  "description": "Dead-simple in-app push notifications for any dApp — wallet-authenticated, real-time, and lightweight.",
+  "version": "0.3.0",
+  "description": "In-app, web push and mobile push notifications for any dApp \u2014 wallet-authenticated, real-time, and lightweight.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
