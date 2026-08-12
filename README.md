@@ -13,6 +13,94 @@ await os.start(); // wallet signs in → notifications start showing
 That's the whole integration. No framework required — `socket.io-client` is
 bundled as a dependency, nothing else to install.
 
+## OS notifications (web push)
+
+The in-app toast only reaches someone while your page is open. Web push reaches
+them when the browser is **closed** — including on a phone, through a mobile
+browser or a home-screen PWA on iOS 16.4+.
+
+It needs no configuration from you. OnchainSuite holds one platform-wide key.
+
+### 1. Serve the service worker
+
+Copy `node_modules/@onchainsuite/sdk/public/onchainsuite-sw.js` to the **root**
+of your site, so it is served at `/onchainsuite-sw.js`.
+
+The path matters: a service worker only controls pages at or below its own URL,
+so one served from `/static/sw.js` covers `/static` and nothing else.
+
+Already have a service worker? Do not add a second — import ours into yours:
+
+```js
+importScripts("/onchainsuite-sw.js");
+```
+
+Two workers at the same scope fight over the same push events, and only one wins.
+
+### 2. Ask, at the right moment
+
+```ts
+const client = createClient("pk_live_…", { apiBaseUrl: "https://api.onchainsuite.com" });
+await client.start();
+
+// Later — from a button, after the user did something a notification helps with
+if (client.pushStatus() === "prompt") {
+  const status = await client.enablePush();   // "granted" | "denied" | …
+}
+```
+
+> **Do not call `enablePush()` on page load.** A user who taps "Block" is
+> **never asked again** — the browser remembers and there is no API to
+> re-prompt. A prompt at a moment they have no context for does not cost you a
+> retry, it costs you that user permanently.
+>
+> The moment that works is right after they did something a notification would
+> obviously help with — placed an order, opened a position, joined a list.
+
+`pushStatus()` returns `"unsupported" | "denied" | "prompt" | "granted"`. Treat
+the first two the same: do not show a "turn on notifications" button, because
+pressing it can no longer do anything.
+
+### 3. That is it
+
+`start()` re-registers a browser that has already granted permission, without
+prompting. That is not an optimisation — browsers expire push subscriptions
+without telling anyone, and re-registering on every load is the only way a
+silently-rotated subscription is ever noticed.
+
+To turn it off:
+
+```ts
+await client.disablePush();
+```
+
+### What arrives, and when
+
+A notification takes exactly one path per recipient:
+
+| | |
+| --- | --- |
+| Your page is open | in-app toast only |
+| Page closed, push enabled | OS notification |
+| Neither | held, and delivered next time they connect |
+
+Never both — a phone banner about the thing already on screen reads as a bug.
+
+The OS notification carries a **summary** (title, body, link), not the full
+content: it renders on a lock screen where anyone holding the phone can read it.
+Both carry the same `deliveryId`, and the SDK dedupes on it — so a user who taps
+a notification and lands on your page does not see it twice.
+
+### Options
+
+```ts
+createClient("pk_live_…", {
+  push: { serviceWorkerPath: "/onchainsuite-sw.js" },  // default
+  // push: false,                                       // disable entirely
+});
+```
+
+
 ## Install
 
 ```bash

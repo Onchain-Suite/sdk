@@ -8,6 +8,36 @@ export interface Notification {
   cta?: { label: string; url: string };
   createdAt: string;
   expiresAt: string;
+
+  /**
+   * Which rendering contract this payload was built for. Currently `1`.
+   *
+   * The presentation fields below are additive-optional, which is what keeps
+   * older SDK builds working — and also means this is the only way to tell
+   * which fields a payload is promising. **Render an unrecognised version on
+   * your best-effort path rather than refusing**: a notification that looks
+   * slightly wrong beats one that never appears.
+   */
+  renderVersion?: number;
+
+  /** Presentation hints. Honoured by the built-in renderer where it can. */
+  placement?: "modal" | "banner" | "slide-in" | "inline" | "mobile-push";
+  accent?: string;
+  dismissible?: boolean;
+
+  /** Behaviour hints, honoured client-side. */
+  trigger?: "wallet-connect" | "page-view" | "manual";
+  frequency?: "once-per-wallet" | "once-per-session" | "every-time" | "until-dismissed";
+  maxPerSession?: number;
+}
+
+/** Whether this browser can receive OS notifications, and whether it will. */
+export type PushStatus = "unsupported" | "denied" | "prompt" | "granted";
+
+/** A browser push subscription, in the shape the server accepts verbatim. */
+export interface PushRegistration {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
 }
 
 /** Interaction types reported back to the server for analytics. */
@@ -90,6 +120,25 @@ export interface OnchainSuiteOptions {
   ioClient?: unknown;
   /** Enable verbose console logging. Default false. */
   debug?: boolean;
+
+  /**
+   * Web push — OS notifications that arrive when your page is CLOSED.
+   *
+   * Requires a service worker file served from your origin (we publish one you
+   * can copy). Set `false` to disable entirely.
+   *
+   * **Nothing here ever prompts on its own.** `start()` re-registers a browser
+   * that has *already* granted permission — which is required, because browsers
+   * expire subscriptions silently and re-registering is the only way that is
+   * ever noticed. Asking for permission the first time is `enablePush()`, which
+   * you call from your own UI.
+   */
+  push?:
+    | false
+    | {
+        /** Path to your service worker. Default "/onchainsuite-sw.js". */
+        serviceWorkerPath?: string;
+      };
 }
 
 /** Client event names for `.on(...)`. */

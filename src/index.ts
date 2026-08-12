@@ -1,3 +1,9 @@
+import {
+  getPushStatus,
+  isPushSupported,
+  subscribeToPush,
+  unsubscribeFromPush,
+} from "./push";
 import { createToastRenderer, type ToastRenderer } from "./renderer.js";
 import type {
   ClientEvent,
@@ -5,6 +11,7 @@ import type {
   EventType,
   Notification,
   OnchainSuiteOptions,
+  PushStatus,
 } from "./types.js";
 
 export type {
@@ -12,6 +19,8 @@ export type {
   EventType,
   DisplayOptions,
   OnchainSuiteOptions,
+  PushStatus,
+  PushRegistration,
   NotificationActions,
   SignMessageFn,
 } from "./types.js";
@@ -52,6 +61,16 @@ export class OnchainSuite {
 
   private socket: MinimalSocket | null = null;
   private walletAddress: string | null = null;
+  /** Kept after auth: push registration uses the same session as the socket. */
+  private sessionToken: string | null = null;
+  /**
+   * deliveryIds already shown this session.
+   *
+   * A user can meet the same notification twice — once as an OS push they tap,
+   * and again as the socket replay that fires when the page opens. Both carry
+   * the same deliveryId precisely so this is possible to prevent.
+   */
+  private readonly seen = new Set<string>();
 
   constructor(publishableKey: string, options: OnchainSuiteOptions = {}) {
     if (!publishableKey || !publishableKey.startsWith("pk_")) {
@@ -76,7 +95,17 @@ export class OnchainSuite {
     if (!wallet) throw new Error("No wallet address available");
     this.walletAddress = wallet;
     const { token, wsUrl } = await this.authenticate(wallet);
+    this.sessionToken = token;
     await this.openSocket(wsUrl, token, wallet);
+
+    // Re-register a browser that ALREADY granted permission. This never
+    // prompts — and it is not optional: browsers expire push subscriptions
+    // without telling anyone, so re-registering on every start is the only way
+    // a silently-rotated subscription is ever noticed. Failure is non-fatal;
+    // the socket is already up and in-app delivery works regardless.
+    void this.syncPushSubscription({ prompt: false }).catch((err: unknown) =>
+      this.log("push re-registration failed", err)
+    );
   }
 
   /** Stop receiving notifications and clear any built-in toasts. */
@@ -87,6 +116,8 @@ export class OnchainSuite {
       /* ignore */
     }
     this.socket = null;
+    this.sessionToken = null;
+    this.seen.clear();
     this.renderer?.destroy();
   }
 
@@ -113,7 +144,117 @@ export class OnchainSuite {
     }
   }
 
+  /**
+   * Ask this browser for notification permission and subscribe it.
+   *
+   * **Call this from your own UI, in response to something the user did.** A
+   * user who taps "Block" is never asked again — the browser remembers and
+   * there is no API to re-prompt — so a prompt at a moment they have no context
+   * for does not cost you a retry, it costs you that user permanently. The
+   * moment that works is just after they did something a notification would
+   * obviously help with.
+   *
+   * Safe to call repeatedly: an already-granted browser re-registers without
+   * prompting.
+   *
+   * @returns the resulting status. `"granted"` means notifications will now
+   *   arrive with the page closed.
+   */
+  async enablePush(): Promise<PushStatus> {
+    if (!this.sessionToken) {
+      throw new Error("Call start() before enablePush()");
+    }
+    const registered = await this.syncPushSubscription({ prompt: true });
+    return registered ? "granted" : getPushStatus();
+  }
+
+  /**
+   * Whether this browser can receive OS notifications, and whether it will.
+   *
+   * `"unsupported"` and `"denied"` are both terminal — do not offer a "turn on
+   * notifications" button for either, because pressing it can no longer do
+   * anything.
+   */
+  pushStatus(): PushStatus {
+    return getPushStatus();
+  }
+
+  /** Turn OS notifications off for this browser, and tell the server. */
+  async disablePush(): Promise<void> {
+    const path = this.serviceWorkerPath();
+    const endpoint = await unsubscribeFromPush(path);
+    if (!endpoint || !this.sessionToken) return;
+
+    // Told to the server explicitly: it cannot otherwise know WHICH of a
+    // wallet's browsers just opted out.
+    await this.authedPost("/api/v1/inapp/push", { endpoint }, "DELETE").catch(
+      (err: unknown) => this.log("push unregister failed", err)
+    );
+  }
+
   // --- internals -----------------------------------------------------------
+
+  private serviceWorkerPath(): string {
+    const configured = this.opts.push === false ? null : this.opts.push;
+    return configured?.serviceWorkerPath ?? "/onchainsuite-sw.js";
+  }
+
+  /**
+   * Fetch the platform VAPID key, subscribe, and register with the server.
+   *
+   * Checks the server has push configured BEFORE prompting. Asking for
+   * permission we cannot then use is the worst available outcome — it burns the
+   * one prompt the browser will ever give us.
+   */
+  private async syncPushSubscription(opts: {
+    prompt: boolean;
+  }): Promise<boolean> {
+    if (this.opts.push === false || !this.sessionToken) return false;
+    if (!isPushSupported()) return false;
+
+    const config = await this.post<{ enabled: boolean; publicKey: string | null }>(
+      "/api/v1/inapp/push/vapid-key",
+      undefined,
+      "GET"
+    );
+    if (!config?.enabled || !config.publicKey) {
+      this.log("web push is not configured on the server");
+      return false;
+    }
+
+    const registration = await subscribeToPush({
+      vapidPublicKey: config.publicKey,
+      serviceWorkerPath: this.serviceWorkerPath(),
+      prompt: opts.prompt,
+    });
+    if (!registration) return false;
+
+    await this.authedPost("/api/v1/inapp/push/web", registration);
+    this.log("web push registered");
+    return true;
+  }
+
+  /** POST/DELETE carrying the in-app session token the socket also uses. */
+  private async authedPost<T>(
+    path: string,
+    body: unknown,
+    method: "POST" | "DELETE" = "POST"
+  ): Promise<T> {
+    const res = await fetch(`${this.base}${path}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.sessionToken ?? ""}`,
+      },
+      // DELETE carries a body here — it names WHICH subscription to remove.
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error(`${method} ${path} failed: ${res.status}`);
+    }
+    return (await res.json()) as T;
+  }
+
 
   private async authenticate(
     wallet: string
@@ -186,6 +327,13 @@ export class OnchainSuite {
 
   private handleNotification(n: Notification): void {
     if (!n || !n.deliveryId) return;
+
+    // Already shown — almost always an OS push the user tapped, followed by the
+    // socket replay on page open. Reporting `delivered` twice would also
+    // double-count the analytics.
+    if (this.seen.has(n.deliveryId)) return;
+    this.seen.add(n.deliveryId);
+
     this.report(n, "delivered");
     this.emit("notification", n);
 
@@ -256,15 +404,20 @@ export class OnchainSuite {
     );
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(
+    path: string,
+    body: unknown,
+    method: "POST" | "GET" = "POST",
+  ): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
-      method: "POST",
+      method,
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
         "x-publishable-key": this.publishableKey,
       },
-      body: JSON.stringify(body),
+      // A GET with a body is rejected by fetch.
+      ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
     });
     const data = (await res.json().catch(() => ({}))) as {
       data?: T;

@@ -23,6 +23,7 @@
   "files": [
     "dist",
     "src",
+    "public",
     "README.md"
   ],
   "sideEffects": false,
