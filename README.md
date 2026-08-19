@@ -1,7 +1,7 @@
 # @onchainsuite/sdk
 
 Dead-simple in-app push notifications for any dApp. Wallet-authenticated,
-real-time, and tiny. Built-in toast UI you can fully restyle — or render your own.
+real-time, and tiny. Built-in toast UI you can fully restyle or render your own.
 
 ```ts
 import { OnchainSuite } from "@onchainsuite/sdk";
@@ -49,7 +49,7 @@ if (client.pushStatus() === "prompt") {
 }
 ```
 
-> **Do not call `enablePush()` on page load.** A user who taps "Block" is
+> **Do not call** **`enablePush()`** **on page load.** A user who taps "Block" is
 > **never asked again** — the browser remembers and there is no API to
 > re-prompt. A prompt at a moment they have no context for does not cost you a
 > retry, it costs you that user permanently.
@@ -78,11 +78,11 @@ await client.disablePush();
 
 A notification takes exactly one path per recipient:
 
-| | |
-| --- | --- |
-| Your page is open | in-app toast only |
-| Page closed, push enabled | OS notification |
-| Neither | held, and delivered next time they connect |
+| <br />                    | <br />                                     |
+| ------------------------- | ------------------------------------------ |
+| Your page is open         | in-app toast only                          |
+| Page closed, push enabled | OS notification                            |
+| Neither                   | held, and delivered next time they connect |
 
 Never both — a phone banner about the thing already on screen reads as a bug.
 
@@ -120,7 +120,7 @@ await client.registerDevice(token, "android");
 messaging().onTokenRefresh((t) => client.registerDevice(t, "android"));
 ```
 
-> **Call `registerDevice` on every app launch**, not only after the permission
+> **Call** **`registerDevice`** **on every app launch**, not only after the permission
 > prompt. Tokens rotate on reinstall and sometimes on OS upgrade, and nothing
 > announces it — re-registering is the only way a rotated token is ever noticed.
 > Repeat calls upsert; they do not accumulate devices.
@@ -158,7 +158,6 @@ createClient("pk_live_…", {
   // push: false,                                       // disable entirely
 });
 ```
-
 
 ## Install
 
@@ -294,15 +293,15 @@ new OnchainSuite("pk_live_...", {
 `publishableKey` — `pk_live_*` / `pk_test_*` from **Dashboard → Integrations →
 In-App**.
 
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `apiBaseUrl` | `string` | same-origin | API host, no `/api/v1`. |
-| `signMessage` | `(msg, wallet) => Promise<string>` | `window.ethereum` | Custom signer. |
-| `provider` | EIP-1193 | `window.ethereum` | Wallet provider for the default signer. |
-| `display` | `DisplayOptions \| false` | enabled | `false` = headless. See table below. |
-| `onNotification` | `(n, actions) => boolean \| void` | — | Custom handler; return `false` to skip built-in UI. |
-| `ioClient` | `io` factory | auto | Provide socket.io-client's `io` explicitly. |
-| `debug` | `boolean` | `false` | Verbose logging. |
+| Option           | Type                               | Default           | Notes                                               |
+| ---------------- | ---------------------------------- | ----------------- | --------------------------------------------------- |
+| `apiBaseUrl`     | `string`                           | same-origin       | API host, no `/api/v1`.                             |
+| `signMessage`    | `(msg, wallet) => Promise<string>` | `window.ethereum` | Custom signer.                                      |
+| `provider`       | EIP-1193                           | `window.ethereum` | Wallet provider for the default signer.             |
+| `display`        | `DisplayOptions \| false`          | enabled           | `false` = headless. See table below.                |
+| `onNotification` | `(n, actions) => boolean \| void`  | —                 | Custom handler; return `false` to skip built-in UI. |
+| `ioClient`       | `io` factory                       | auto              | Provide socket.io-client's `io` explicitly.         |
+| `debug`          | `boolean`                          | `false`           | Verbose logging.                                    |
 
 `DisplayOptions`: `position`, `accent`, `background`, `foreground`,
 `duration` (`number | (n) => number`, `0` = sticky), `maxVisible`, `zIndex`,
@@ -352,3 +351,4 @@ Security notes:
 ## Docs
 
 - Runnable demo: [`example/index.html`](./example/index.html).
+
