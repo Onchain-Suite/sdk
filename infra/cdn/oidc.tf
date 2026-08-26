@@ -25,8 +25,14 @@ variable "github_repository_id" {
 }
 
 variable "github_allowed_sub" {
-  # Matched case-insensitively, so owner/repo casing doesn't matter; restricts to main.
-  default = "repo:Onchain-Suite/sdk:ref:refs/heads/main"
+  # This org has OIDC SUBJECT-CLAIM CUSTOMIZATION on, so the real `sub` embeds the
+  # numeric owner-id + repo-id (verified via a debug workflow):
+  #   repo:Onchain-Suite@311798183/sdk@1287532658:ref:refs/heads/main
+  # NOT the default `repo:OWNER/REPO:ref:...` — that's why every earlier match missed.
+  # Matched case-insensitively (StringEqualsIgnoreCase) for good measure; restricts to
+  # the main branch. If the org's subject-claim template changes, re-check with the
+  # debug workflow. (repository_id below is the rename-proof pin regardless.)
+  default = "repo:Onchain-Suite@311798183/sdk@1287532658:ref:refs/heads/main"
 }
 
 # One OIDC provider per AWS account. If you already have GitHub's provider, delete this
