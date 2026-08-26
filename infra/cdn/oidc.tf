@@ -11,13 +11,22 @@
 variable "github_org"  { default = "onchainsuite" }
 variable "github_repo" { default = "sdk" }
 
-# We scope the role to this repo by its NUMERIC repository_id, not the `sub` string.
-# Why: the `sub` claim embeds the repo's owner/name with canonical casing
-# (`Onchain-Suite/sdk`) and IAM matches case-sensitively — we got bitten by that twice.
-# `repository_id` is immutable and case-free (also survives a repo rename), so it's both
-# more robust and more secure. Get it from `gh api repos/OWNER/REPO --jq .id`.
+# Trust is scoped two ways (both must hold): the immutable numeric repository_id AND
+# the sub matched case-INSENSITIVELY.
+#
+# The casing saga: GitHub emits the OIDC `sub` claim with a DIFFERENT casing than the
+# `repository`/provenance claim — so even an exact mixed-case `Onchain-Suite` StringLike
+# was denied. `StringEqualsIgnoreCase` (which AWS's own error message pointed to) fixes
+# that. And AWS REQUIRES a sub or job_workflow_ref condition on the GitHub provider — a
+# repository_id-only policy is rejected as MalformedPolicyDocument — so sub must be here
+# regardless. repository_id stays as an extra, case-free, rename-proof guard.
 variable "github_repository_id" {
-  default = "1287532658" # Onchain-Suite/sdk
+  default = "1287532658" # Onchain-Suite/sdk (gh api repos/OWNER/REPO --jq .id)
+}
+
+variable "github_allowed_sub" {
+  # Matched case-insensitively, so owner/repo casing doesn't matter; restricts to main.
+  default = "repo:Onchain-Suite/sdk:ref:refs/heads/main"
 }
 
 # One OIDC provider per AWS account. If you already have GitHub's provider, delete this
@@ -50,10 +59,15 @@ data "aws_iam_policy_document" "github_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Restrict to THIS repo by immutable numeric id. This is what stops any other
-    # repo's workflow from assuming the role even though the OIDC provider is
-    # account-wide. (Any ref/branch of this repo may assume it; the role's own policy
-    # is narrow — s3:PutObject to the CDN bucket + one CreateInvalidation.)
+    # Branch/repo restriction via sub, matched case-insensitively (see var comment).
+    # Required by AWS for the GitHub provider, and this is where casing bit us.
+    condition {
+      test     = "StringEqualsIgnoreCase"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [var.github_allowed_sub]
+    }
+
+    # Extra guard: pin to THIS repo by immutable numeric id (case-free, rename-proof).
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:repository_id"
