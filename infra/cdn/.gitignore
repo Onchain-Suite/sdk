@@ -1,0 +1,8 @@
+# Terraform working dir + local state — never commit (state can hold secrets)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+# The provider lock file SHOULD be committed for reproducible providers:
+!.terraform.lock.hcl
