@@ -1,0 +1,22 @@
+name: OIDC Debug
+on: workflow_dispatch
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the GitHub OIDC token claims (no secrets, safe)
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          python3 - "$PAYLOAD" <<'PY'
+          import sys,base64,json
+          p=sys.argv[1]; p+='='*(-len(p)%4)
+          c=json.loads(base64.urlsafe_b64decode(p))
+          for k in ("sub","aud","repository","repository_id","repository_owner","repository_owner_id","ref","job_workflow_ref"):
+              print(f"{k} = {c.get(k)!r}")
+          PY
