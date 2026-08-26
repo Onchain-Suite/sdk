@@ -55,8 +55,10 @@ jobs:
           node-version: 20
           cache: npm
           registry-url: "https://registry.npmjs.org"
-      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 20 ships an older npm.
-      - run: npm install -g npm@latest
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 20 ships npm 10. Pin
+      # to npm 11 (not @latest): npm 12 requires Node >= 22.22, but this runner is on
+      # Node 20 — @latest fails with EBADENGINE. npm 11 has OIDC and supports Node 20.
+      - run: npm install -g npm@11
       - run: npm ci
       # Full gate BEFORE we bump/publish, so a bad build never reaches npm.
       - run: npm run typecheck
