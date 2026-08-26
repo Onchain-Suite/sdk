@@ -1,0 +1,38 @@
+name: CI
+
+# Gate every PR + push to main: nothing merges unless it type-checks, tests, and
+# builds both the ESM and the browser IIFE. This is the "don't ship mistakes" net.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Assert build outputs exist (ESM + IIFE)
+        run: |
+          test -f dist/index.js  || { echo "::error::missing dist/index.js";  exit 1; }
+          test -f dist/inapp.js  || { echo "::error::missing dist/inapp.js";  exit 1; }
+      - name: Assert the package tarball is publishable
+        run: npm publish --dry-run

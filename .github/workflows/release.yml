@@ -1,0 +1,173 @@
+name: Release
+
+# One button, pick the bump. Builds + tests, bumps the version, publishes the
+# package to npm AND the browser loader (dist/inapp.js) to our own CDN (S3 +
+# CloudFront), then pushes the version commit/tag and cuts a GitHub Release.
+#
+#   beta  → prerelease (X.Y.Z-beta.N), published under the `beta` dist-tag so it
+#           NEVER becomes `latest`. Install with `npm i @onchainsuite/sdk@beta`.
+#   patch → X.Y.(Z+1)   ┐
+#   minor → X.(Y+1).0   ├ published as `latest` (the default install).
+#   major → (X+1).0.0   ┘
+#
+# Two delivery channels, on purpose:
+#   npm            — for bundled apps (`npm i @onchainsuite/sdk`, React/Next/ESM).
+#   S3 + CloudFront — for the no-build <script> loader the dashboard hands out;
+#                    served from cdn.onchainsuite.com, a host WE control (see below).
+#
+# One-time setup (NO stored credentials — both halves publish via GitHub OIDC):
+#   - npm: configure a Trusted Publisher on npmjs.com for @onchainsuite/sdk →
+#          GitHub Actions, org `onchainsuite`, repo `sdk`, workflow `release.yml`.
+#          No NPM_TOKEN. (Package settings → Publishing access → Trusted Publisher.)
+#   - variable `AWS_ROLE_ARN`          IAM role assumed via GitHub OIDC — NO stored AWS
+#                                      keys. Scoped to s3:PutObject on the bucket +
+#                                      cloudfront:CreateInvalidation on the distro.
+#   - variable `AWS_REGION`            bucket region, e.g. us-east-1
+#   - variable `CDN_S3_BUCKET`         the origin bucket CloudFront fronts
+#   - variable `CDN_CF_DISTRIBUTION_ID` the CloudFront distribution id (for invalidation)
+#   GITHUB_TOKEN is provided automatically. If AWS_ROLE_ARN/CDN_S3_BUCKET are absent the
+#   CDN step skips with a warning instead of failing the release. The role, its trust
+#   policy, and the infra are all in infra/cdn/ (Terraform + runbook). Static-key
+#   alternative (no OIDC) is documented in infra/cdn/README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Version bump / channel"
+        required: true
+        default: beta
+        type: choice
+        options: [beta, patch, minor, major]
+
+permissions:
+  contents: write # push the version commit + tag, create the Release
+  id-token: write # mint the OIDC token that assumes the AWS role (no stored keys)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 20 ships an older npm.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      # Full gate BEFORE we bump/publish, so a bad build never reaches npm.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Bump version
+        id: v
+        run: |
+          if [ "${{ inputs.release_type }}" = "beta" ]; then
+            npm version prerelease --preid=beta -m "release: v%s"
+            echo "dist_tag=beta" >> "$GITHUB_OUTPUT"
+          else
+            npm version "${{ inputs.release_type }}" -m "release: v%s"
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      # Publish via npm Trusted Publishing (OIDC) — no NPM_TOKEN. The id-token
+      # permission (above) lets npm exchange a GitHub OIDC token for a short-lived
+      # publish credential, and it attaches build provenance automatically. Requires
+      # the Trusted Publisher to be configured on npmjs.com (see header + README).
+      - name: Publish to npm (Trusted Publishing / OIDC)
+        run: npm publish --access public --tag "${{ steps.v.outputs.dist_tag }}"
+      # Serve the browser loader (dist/inapp.js) from OUR OWN CDN, not a public npm
+      # CDN. cdn.onchainsuite.com is CloudFront in front of this S3 bucket, so the
+      # dashboard install snippet loads a file WE control: our uptime, our CSP origin,
+      # our cache rules, hotfixable without waiting on npm/unpkg propagation. This is
+      # the production path; unpkg was only the interim.
+      #
+      # (We use AWS, not Cloudflare R2: onchainsuite.com's DNS is on GoDaddy, and
+      # Cloudflare R2 custom domains require the whole domain on Cloudflare — a
+      # nameserver move we avoid to keep SES email untouched. CloudFront takes a plain
+      # CNAME at GoDaddy, so nameservers never move.)
+      #
+      # Two objects per release:
+      #   inapp-<version>.js  immutable, cached forever — customers pin this
+      #   inapp.js            stable alias, short TTL — moved ONLY on a stable release
+      #                       (never beta), same rule as the `latest` dist-tag; its
+      #                       CloudFront path is invalidated so the move is prompt.
+      #
+      # One-time setup: variable AWS_ROLE_ARN (an IAM role assumed via GitHub OIDC —
+      # NO stored AWS keys), plus AWS_REGION, CDN_S3_BUCKET, CDN_CF_DISTRIBUTION_ID.
+      # Until they exist the CDN step SKIPS with a warning — npm already published
+      # (immutable), so failing here would be misleading.
+      #
+      # OIDC: GitHub mints a short-lived token, the role's trust policy checks it comes
+      # from THIS repo, and STS hands back 15-minute credentials. Nothing long-lived is
+      # stored. The `if:` gate skips the assume-role when the role isn't configured yet,
+      # so a fresh repo still runs the release (just without the CDN upload).
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ vars.AWS_ROLE_ARN != '' && vars.CDN_S3_BUCKET != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Publish inapp.js to CDN (S3 + CloudFront)
+        env:
+          S3_BUCKET: ${{ vars.CDN_S3_BUCKET }}
+          CF_DISTRIBUTION_ID: ${{ vars.CDN_CF_DISTRIBUTION_ID }}
+          ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          VERSION: ${{ steps.v.outputs.version }}
+          DIST_TAG: ${{ steps.v.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN:-}" ] || [ -z "${S3_BUCKET:-}" ]; then
+            echo "::warning::CDN not configured (need AWS_ROLE_ARN + CDN_S3_BUCKET variables) — skipping CDN upload. npm publish already succeeded."
+            exit 0
+          fi
+          CT="text/javascript; charset=utf-8"
+
+          # Immutable versioned object — safe to cache forever because the URL
+          # changes on every release.
+          aws s3 cp dist/inapp.js "s3://${S3_BUCKET}/inapp-${VERSION}.js" \
+            --content-type "$CT" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # Stable alias — only a stable release moves it; beta stays pinned-only so
+          # `inapp.js` never serves a prerelease to production sites. Invalidate its
+          # CloudFront path so the short-TTL alias updates immediately, not in ~5 min.
+          if [ "$DIST_TAG" = "latest" ]; then
+            aws s3 cp dist/inapp.js "s3://${S3_BUCKET}/inapp.js" \
+              --content-type "$CT" \
+              --cache-control "public, max-age=300"
+            if [ -n "${CF_DISTRIBUTION_ID:-}" ]; then
+              aws cloudfront create-invalidation \
+                --distribution-id "$CF_DISTRIBUTION_ID" --paths "/inapp.js"
+            fi
+          fi
+
+          # SRI hash for the versioned file, so the snippet can add integrity=.
+          SRI="sha384-$(openssl dgst -sha384 -binary dist/inapp.js | openssl base64 -A)"
+          {
+            echo "### CDN upload (S3 + CloudFront → cdn.onchainsuite.com)"
+            echo ""
+            echo "- Versioned: \`https://cdn.onchainsuite.com/inapp-${VERSION}.js\` (immutable)"
+            [ "$DIST_TAG" = "latest" ] \
+              && echo "- Stable alias \`inapp.js\` → moved to ${VERSION} (+ CloudFront invalidation)" \
+              || echo "- Stable alias \`inapp.js\` → unchanged (beta stays pinned-only)"
+            echo "- SRI: \`${SRI}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Push version commit + tag
+        run: git push --follow-tags
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRE=""
+          [ "${{ steps.v.outputs.dist_tag }}" = "beta" ] && PRE="--prerelease"
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --title "v${{ steps.v.outputs.version }}" \
+            --generate-notes $PRE

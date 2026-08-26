@@ -3,14 +3,26 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OnchainSuite In-App SDK — demo</title>
+    <title>@onchainsuite/sdk — production push test</title>
     <style>
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        max-width: 640px;
-        margin: 48px auto;
+        max-width: 680px;
+        margin: 40px auto;
         padding: 0 16px;
         color: #111;
+        line-height: 1.5;
+      }
+      h1 { font-size: 22px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+      label { font-size: 13px; font-weight: 600; display: block; margin-top: 12px; }
+      input {
+        width: 100%;
+        padding: 9px 11px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        font-size: 14px;
+        box-sizing: border-box;
       }
       button {
         padding: 10px 16px;
@@ -21,50 +33,129 @@
         cursor: pointer;
         font-weight: 600;
       }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      button.secondary { background: #fff; color: #333; }
       code { background: #f2f2f5; padding: 2px 5px; border-radius: 4px; }
-      #log { margin-top: 16px; font-size: 13px; color: #444; white-space: pre-wrap; }
+      #status { font-size: 13px; margin: 8px 0; }
+      #log {
+        margin-top: 16px;
+        font-size: 12.5px;
+        color: #333;
+        white-space: pre-wrap;
+        background: #f7f7fa;
+        border-radius: 8px;
+        padding: 12px;
+        max-height: 320px;
+        overflow: auto;
+      }
+      .hint { font-size: 12.5px; color: #666; }
     </style>
   </head>
   <body>
-    <h1>In-App Push demo</h1>
-    <p>
-      Connect a wallet to authenticate and start receiving live notifications.
-      Trigger a test push from <em>Dashboard → Integrations → In-App → Test push</em>.
+    <h1>@onchainsuite/sdk — production push test</h1>
+    <p class="hint">
+      Loads the <strong>published beta</strong>
+      (<code>@onchainsuite/sdk@0.3.0</code> via esm.sh) and points it at the
+      <strong>production API</strong>. Exercises the 0.3.0 web-push flow end to
+      end: wallet auth → subscribe → OS notification. Serve this folder over
+      <code>http(s)</code> (service workers need a secure context; localhost
+      counts) — see the run steps in <code>PUBLISHING.md</code>.
     </p>
-    <button id="connect">Connect wallet &amp; listen</button>
+
+    <label for="pk">Publishable key (prod <code>pk_…</code>)</label>
+    <input id="pk" placeholder="pk_live_yourorg_…" autocomplete="off" />
+
+    <label for="api">API base URL</label>
+    <input id="api" value="https://api.onchainsuite.com" autocomplete="off" />
+
+    <div class="row" style="margin-top: 16px">
+      <button id="connect">1 · Connect wallet &amp; start</button>
+      <button id="enable" class="secondary" disabled>2 · Enable web push</button>
+      <button id="status-btn" class="secondary" disabled>Check status</button>
+      <button id="disable" class="secondary" disabled>Disable push</button>
+    </div>
+
+    <div id="status">push status: <code>—</code></div>
+    <p class="hint">
+      After enabling, trigger a notification from
+      <em>Dashboard → Integrations → In-App → Test push</em>. Close this tab to
+      confirm the OS-level (service-worker) delivery, which is the 0.3.0 feature.
+    </p>
+
     <div id="log"></div>
 
-    <!-- 1) socket.io-client (exposes window.io) -->
-    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
-
-    <!-- 2) The SDK. After publishing, swap the import for:
-         import { OnchainSuite } from "https://esm.sh/@onchainsuite/sdk"; -->
+    <!--
+      The service worker (onchainsuite-sw.js) is served next to this page so its
+      scope covers it and the SDK's default `/onchainsuite-sw.js` path resolves.
+      It is copied from the package's `public/` — do not edit it here.
+    -->
     <script type="module">
-      import { OnchainSuite } from "../dist/index.js";
+      import { OnchainSuite } from "https://esm.sh/@onchainsuite/sdk@0.3.0";
 
       const logEl = document.getElementById("log");
-      const log = (m) => (logEl.textContent += m + "\n");
+      const statusEl = document.getElementById("status");
+      const log = (m) => {
+        logEl.textContent += `${new Date().toLocaleTimeString()}  ${m}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+      const setStatus = (s) =>
+        (statusEl.innerHTML = `push status: <code>${s}</code>`);
 
-      const os = new OnchainSuite("pk_test_yourorg_replace_me", {
-        apiBaseUrl: "https://api.onchainsuite.com", // your API host
-        debug: true,
-        display: { position: "bottom-right", accent: "#6d5efc", duration: 10000 },
-        onNotification: (n) => {
-          log(`📩 ${n.title} — ${n.body}`);
-          // return false here to render it yourself instead of the built-in toast
-        },
+      const $ = (id) => document.getElementById(id);
+      let os = null;
+
+      $("connect").addEventListener("click", async () => {
+        const key = $("pk").value.trim();
+        if (!key) return log("⚠️ paste a prod publishable key first");
+        try {
+          os = new OnchainSuite(key, {
+            apiBaseUrl: $("api").value.trim(),
+            debug: true,
+            // Default SW path is "/onchainsuite-sw.js"; set explicitly for clarity.
+            push: { serviceWorkerPath: "/onchainsuite-sw.js" },
+            display: { position: "bottom-right", accent: "#6d5efc" },
+            onNotification: (n) => log(`📩 in-app: ${n.title} — ${n.body}`),
+          });
+          os.on("connected", () => log("✅ socket connected"));
+          os.on("disconnected", () => log("… disconnected (will retry)"));
+          os.on("error", (e) => log("⚠️ " + (e?.message ?? "error")));
+
+          log("starting (wallet will prompt to sign)…");
+          await os.start();
+          log("✅ authenticated + listening");
+          setStatus(os.pushStatus());
+          $("enable").disabled = false;
+          $("status-btn").disabled = false;
+          $("disable").disabled = false;
+        } catch (e) {
+          log("❌ start failed: " + (e?.message ?? e));
+        }
       });
 
-      os.on("connected", () => log("✅ connected"));
-      os.on("disconnected", () => log("… disconnected (will retry)"));
-      os.on("error", (e) => log("⚠️ " + (e?.message ?? "error")));
-
-      document.getElementById("connect").addEventListener("click", async () => {
+      $("enable").addEventListener("click", async () => {
         try {
-          await os.start(); // prompts window.ethereum to sign
-          log("listening for notifications…");
+          log("requesting push permission + subscribing…");
+          const s = await os.enablePush(); // must be from a user gesture
+          setStatus(s);
+          log("✅ enablePush → " + s);
         } catch (e) {
-          log("auth failed: " + (e?.message ?? e));
+          log("❌ enablePush failed: " + (e?.message ?? e));
+        }
+      });
+
+      $("status-btn").addEventListener("click", () => {
+        const s = os.pushStatus();
+        setStatus(s);
+        log("push status: " + s);
+      });
+
+      $("disable").addEventListener("click", async () => {
+        try {
+          await os.disablePush();
+          setStatus(os.pushStatus());
+          log("✅ disabled push for this browser");
+        } catch (e) {
+          log("❌ disablePush failed: " + (e?.message ?? e));
         }
       });
     </script>
