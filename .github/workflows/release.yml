@@ -1,0 +1,78 @@
+name: Release
+
+# One button, pick the bump. Builds + tests, bumps the version, publishes to npm,
+# then pushes the version commit/tag and cuts a GitHub Release.
+#
+#   beta  → prerelease (X.Y.Z-beta.N), published under the `beta` dist-tag so it
+#           NEVER becomes `latest`. Install with `npm i @onchainsuite/sdk@beta`.
+#   patch → X.Y.(Z+1)   ┐
+#   minor → X.(Y+1).0   ├ published as `latest` (the default install).
+#   major → (X+1).0.0   ┘
+#
+# One-time setup: add repo secret `NPM_TOKEN` (an npm "Automation" token with
+# publish rights to @onchainsuite). GITHUB_TOKEN is provided automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Version bump / channel"
+        required: true
+        default: beta
+        type: choice
+        options: [beta, patch, minor, major]
+
+permissions:
+  contents: write # push the version commit + tag, create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      # Full gate BEFORE we bump/publish, so a bad build never reaches npm.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Fail if NPM_TOKEN is missing
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          [ -n "$NPM_TOKEN" ] || { echo "::error::Set the NPM_TOKEN repo secret first"; exit 1; }
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Bump version
+        id: v
+        run: |
+          if [ "${{ inputs.release_type }}" = "beta" ]; then
+            npm version prerelease --preid=beta -m "release: v%s"
+            echo "dist_tag=beta" >> "$GITHUB_OUTPUT"
+          else
+            npm version "${{ inputs.release_type }}" -m "release: v%s"
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Publish to npm
+        run: npm publish --access public --tag "${{ steps.v.outputs.dist_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Push version commit + tag
+        run: git push --follow-tags
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRE=""
+          [ "${{ steps.v.outputs.dist_tag }}" = "beta" ] && PRE="--prerelease"
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --title "v${{ steps.v.outputs.version }}" \
+            --generate-notes $PRE
