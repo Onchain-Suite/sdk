@@ -85,6 +85,13 @@ jobs:
       # the Trusted Publisher to be configured on npmjs.com (see header + README).
       - name: Publish to npm (Trusted Publishing / OIDC)
         run: npm publish --access public --tag "${{ steps.v.outputs.dist_tag }}"
+      # Push the version commit + tag IMMEDIATELY after publish, before the CDN step.
+      # npm publish is irreversible, so main's version must advance the moment it
+      # succeeds — otherwise a failure in a LATER step leaves main un-bumped and the
+      # next run recomputes the already-published version (E403 "cannot publish over").
+      # A CDN failure after this point is recoverable with infra/cdn/seed.sh.
+      - name: Push version commit + tag
+        run: git push --follow-tags
       # Serve the browser loader (dist/inapp.js) from OUR OWN CDN, not a public npm
       # CDN. cdn.onchainsuite.com is CloudFront in front of this S3 bucket, so the
       # dashboard install snippet loads a file WE control: our uptime, our CSP origin,
@@ -162,8 +169,6 @@ jobs:
               || echo "- Stable alias \`inapp.js\` → unchanged (beta stays pinned-only)"
             echo "- SRI: \`${SRI}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Push version commit + tag
-        run: git push --follow-tags
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
