@@ -1,7 +1,8 @@
 name: Release
 
-# One button, pick the bump. Builds + tests, bumps the version, publishes to npm,
-# then pushes the version commit/tag and cuts a GitHub Release.
+# One button, pick the bump. Builds + tests, bumps the version, publishes the
+# package to npm AND the browser loader (dist/inapp.js) to our own R2 CDN, then
+# pushes the version commit/tag and cuts a GitHub Release.
 #
 #   beta  → prerelease (X.Y.Z-beta.N), published under the `beta` dist-tag so it
 #           NEVER becomes `latest`. Install with `npm i @onchainsuite/sdk@beta`.
@@ -9,8 +10,19 @@ name: Release
 #   minor → X.(Y+1).0   ├ published as `latest` (the default install).
 #   major → (X+1).0.0   ┘
 #
-# One-time setup: add repo secret `NPM_TOKEN` (an npm "Automation" token with
-# publish rights to @onchainsuite). GITHUB_TOKEN is provided automatically.
+# Two delivery channels, on purpose:
+#   npm       — for bundled apps (`npm i @onchainsuite/sdk`, React/Next/ESM).
+#   R2 CDN    — for the no-build <script> loader the dashboard hands out;
+#               served from cdn.onchainsuite.com, a host WE control (see below).
+#
+# One-time setup:
+#   - secret `NPM_TOKEN`            npm "Automation" token, publish rights to @onchainsuite
+#   - secret `R2_ACCESS_KEY_ID`     ┐ Cloudflare R2 API token (S3 creds) scoped
+#   - secret `R2_SECRET_ACCESS_KEY` ┤ to the CDN bucket
+#   - secret `R2_ACCOUNT_ID`        ┘ Cloudflare account id (builds the S3 endpoint)
+#   - variable `R2_BUCKET`          the bucket cdn.onchainsuite.com fronts
+#   GITHUB_TOKEN is provided automatically. If the R2 config is absent the CDN
+#   step skips with a warning instead of failing the release.
 on:
   workflow_dispatch:
     inputs:
@@ -65,6 +77,67 @@ jobs:
         run: npm publish --access public --tag "${{ steps.v.outputs.dist_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Serve the browser loader (dist/inapp.js) from OUR OWN CDN, not a public npm
+      # CDN. cdn.onchainsuite.com fronts this R2 bucket, so the dashboard install
+      # snippet loads a file WE control: our uptime, our CSP origin, our cache rules,
+      # hotfixable without waiting on npm/unpkg propagation. This is the production
+      # path; unpkg was only the interim while the bucket didn't exist.
+      #
+      # Two objects per release:
+      #   inapp-<version>.js  immutable, cached forever — customers pin this
+      #   inapp.js            stable alias, short TTL — moved ONLY on a stable
+      #                       release (never beta), same rule as the `latest` dist-tag
+      #
+      # One-time setup: repo secrets R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
+      # R2_ACCOUNT_ID (an R2 API token scoped to the bucket) + repo variable
+      # R2_BUCKET. Until they exist this step SKIPS with a warning — npm already
+      # published and that's immutable, so failing here would be misleading.
+      - name: Publish inapp.js to R2 (cdn.onchainsuite.com)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          VERSION: ${{ steps.v.outputs.version }}
+          DIST_TAG: ${{ steps.v.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] \
+             || [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ]; then
+            echo "::warning::R2 not configured (need R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID secrets + R2_BUCKET variable) — skipping CDN upload. npm publish already succeeded."
+            exit 0
+          fi
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          CT="text/javascript; charset=utf-8"
+
+          # Immutable versioned object — safe to cache forever because the URL
+          # changes on every release.
+          aws s3 cp dist/inapp.js "s3://${R2_BUCKET}/inapp-${VERSION}.js" \
+            --endpoint-url "$ENDPOINT" \
+            --content-type "$CT" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # Stable alias — only a stable release moves it; beta stays pinned-only so
+          # `inapp.js` never serves a prerelease to production sites.
+          if [ "$DIST_TAG" = "latest" ]; then
+            aws s3 cp dist/inapp.js "s3://${R2_BUCKET}/inapp.js" \
+              --endpoint-url "$ENDPOINT" \
+              --content-type "$CT" \
+              --cache-control "public, max-age=300"
+          fi
+
+          # SRI hash for the versioned file, so the snippet can add integrity=.
+          SRI="sha384-$(openssl dgst -sha384 -binary dist/inapp.js | openssl base64 -A)"
+          {
+            echo "### CDN upload (R2 → cdn.onchainsuite.com)"
+            echo ""
+            echo "- Versioned: \`https://cdn.onchainsuite.com/inapp-${VERSION}.js\` (immutable)"
+            [ "$DIST_TAG" = "latest" ] \
+              && echo "- Stable alias \`inapp.js\` → moved to ${VERSION}" \
+              || echo "- Stable alias \`inapp.js\` → unchanged (beta stays pinned-only)"
+            echo "- SRI: \`${SRI}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Push version commit + tag
         run: git push --follow-tags
       - name: Create GitHub Release
