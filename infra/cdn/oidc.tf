@@ -11,15 +11,13 @@
 variable "github_org"  { default = "onchainsuite" }
 variable "github_repo" { default = "sdk" }
 
-# Which workflow refs may assume the role. The release runs via workflow_dispatch on
-# the default branch, so lock it to main. Widen if you release from tags/environments:
-#   "repo:ORG/REPO:ref:refs/tags/*"  or  "repo:ORG/REPO:environment:production"
-#
-# CASING MATTERS: the GitHub OIDC `sub` claim uses the repo's CANONICAL full name
-# (here `Onchain-Suite/sdk`, from `gh api repos/... --jq .full_name`), and IAM matches
-# it case-SENSITIVELY. Use the exact casing or sts:AssumeRoleWithWebIdentity is denied.
-variable "github_allowed_sub" {
-  default = "repo:Onchain-Suite/sdk:ref:refs/heads/main"
+# We scope the role to this repo by its NUMERIC repository_id, not the `sub` string.
+# Why: the `sub` claim embeds the repo's owner/name with canonical casing
+# (`Onchain-Suite/sdk`) and IAM matches case-sensitively — we got bitten by that twice.
+# `repository_id` is immutable and case-free (also survives a repo rename), so it's both
+# more robust and more secure. Get it from `gh api repos/OWNER/REPO --jq .id`.
+variable "github_repository_id" {
+  default = "1287532658" # Onchain-Suite/sdk
 }
 
 # One OIDC provider per AWS account. If you already have GitHub's provider, delete this
@@ -52,12 +50,14 @@ data "aws_iam_policy_document" "github_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Restrict to this repo + ref. This is what stops any other repo's workflow from
-    # assuming the role even though the OIDC provider is account-wide.
+    # Restrict to THIS repo by immutable numeric id. This is what stops any other
+    # repo's workflow from assuming the role even though the OIDC provider is
+    # account-wide. (Any ref/branch of this repo may assume it; the role's own policy
+    # is narrow — s3:PutObject to the CDN bucket + one CreateInvalidation.)
     condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = [var.github_allowed_sub]
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:repository_id"
+      values   = [var.github_repository_id]
     }
   }
 }
