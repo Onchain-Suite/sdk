@@ -1,16 +1,19 @@
 {
   "name": "@onchainsuite/sdk",
   "version": "0.3.0",
-  "description": "In-app, web push and mobile push notifications for any dApp \u2014 wallet-authenticated, real-time, and lightweight.",
+  "description": "In-app, web push and mobile push notifications for any dApp — wallet-authenticated, real-time, and lightweight.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "unpkg": "./dist/inapp.js",
+  "jsdelivr": "./dist/inapp.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./inapp.js": "./dist/inapp.js"
   },
   "repository": {
     "type": "git",
@@ -28,7 +31,9 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build:esm && npm run build:iife",
+    "build:esm": "tsc -p tsconfig.json",
+    "build:iife": "esbuild src/browser.ts --bundle --format=iife --platform=browser --target=es2020 --minify --legal-comments=none --outfile=dist/inapp.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -49,8 +54,9 @@
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
+    "esbuild": "^0.24.2",
     "jsdom": "^29.1.1",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11"
   }
 }

@@ -165,8 +165,35 @@ createClient("pk_live_…", {
 npm i @onchainsuite/sdk
 ```
 
-No build step? Load it from a CDN (load `socket.io-client` first so the SDK finds
-`window.io`):
+### No build step (plain HTML, PHP, any server-rendered page)
+
+**One self-contained `<script>`** — `dist/inapp.js` bundles `socket.io-client`, so
+there's nothing else to load. Point the tag at a publishable `pk_*` key and it
+auto-inits `window.onchainsuite`:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/@onchainsuite/sdk/dist/inapp.js"
+        data-key="pk_live_yourorg_xxx"></script>
+<script>
+  // `window.onchainsuite` is a ready instance — start it once a wallet connects:
+  document.querySelector("#connect").onclick = () =>
+    window.onchainsuite.start(/* walletAddress?, or omit to prompt window.ethereum */);
+  window.onchainsuite.on("notification", (n) => console.log(n));
+</script>
+```
+
+- `data-key` is a **publishable** `pk_live_…` / `pk_test_…` key — **never** the
+  `sk_*` secret key (that's server-side only).
+- Optional: `data-api="https://api.onchainsuite.com"` to override the endpoint;
+  `data-autostart` to begin the wallet handshake on load.
+- The same file also exposes the class, so you can construct it yourself instead:
+  `const os = new OnchainSuite("pk_live_…")`.
+
+_(PHP/any backend: render the tag above for the browser render, and use the plain
+REST API — `sk_*` Bearer — for server-side sends. The SDK is browser-only.)_
+
+**ESM from a CDN**, if you prefer modules (load `socket.io-client` first so the SDK
+finds `window.io`):
 
 ```html
 <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
