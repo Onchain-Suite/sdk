@@ -17,12 +17,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/onchainsuite/sdk.git"
+    "url": "git+https://github.com/Onchain-Suite/sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/onchainsuite/sdk/issues"
+    "url": "https://github.com/Onchain-Suite/sdk/issues"
   },
-  "homepage": "https://github.com/onchainsuite/sdk#readme",
+  "homepage": "https://github.com/Onchain-Suite/sdk#readme",
   "files": [
     "dist",
     "src",
