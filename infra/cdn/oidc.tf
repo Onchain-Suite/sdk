@@ -14,8 +14,12 @@ variable "github_repo" { default = "sdk" }
 # Which workflow refs may assume the role. The release runs via workflow_dispatch on
 # the default branch, so lock it to main. Widen if you release from tags/environments:
 #   "repo:ORG/REPO:ref:refs/tags/*"  or  "repo:ORG/REPO:environment:production"
+#
+# CASING MATTERS: the GitHub OIDC `sub` claim uses the repo's CANONICAL full name
+# (here `Onchain-Suite/sdk`, from `gh api repos/... --jq .full_name`), and IAM matches
+# it case-SENSITIVELY. Use the exact casing or sts:AssumeRoleWithWebIdentity is denied.
 variable "github_allowed_sub" {
-  default = "repo:onchainsuite/sdk:ref:refs/heads/main"
+  default = "repo:Onchain-Suite/sdk:ref:refs/heads/main"
 }
 
 # One OIDC provider per AWS account. If you already have GitHub's provider, delete this
