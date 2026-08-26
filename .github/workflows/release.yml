@@ -17,14 +17,16 @@ name: Release
 #
 # One-time setup:
 #   - secret `NPM_TOKEN`               npm "Automation" token, publish rights to @onchainsuite
-#   - secret `AWS_ACCESS_KEY_ID`       ┐ IAM user scoped to s3:PutObject on the bucket +
-#   - secret `AWS_SECRET_ACCESS_KEY`   ┘ cloudfront:CreateInvalidation on the distro
+#   - variable `AWS_ROLE_ARN`          IAM role assumed via GitHub OIDC — NO stored AWS
+#                                      keys. Scoped to s3:PutObject on the bucket +
+#                                      cloudfront:CreateInvalidation on the distro.
 #   - variable `AWS_REGION`            bucket region, e.g. us-east-1
 #   - variable `CDN_S3_BUCKET`         the origin bucket CloudFront fronts
 #   - variable `CDN_CF_DISTRIBUTION_ID` the CloudFront distribution id (for invalidation)
-#   GITHUB_TOKEN is provided automatically. If the CDN config is absent the CDN
-#   step skips with a warning instead of failing the release. Infra + IAM policy:
-#   infra/cdn/ (Terraform + runbook).
+#   GITHUB_TOKEN is provided automatically. If AWS_ROLE_ARN/CDN_S3_BUCKET are absent the
+#   CDN step skips with a warning instead of failing the release. The role, its trust
+#   policy, and the infra are all in infra/cdn/ (Terraform + runbook). Static-key
+#   alternative (no OIDC) is documented in infra/cdn/README.md.
 on:
   workflow_dispatch:
     inputs:
@@ -37,6 +39,7 @@ on:
 
 permissions:
   contents: write # push the version commit + tag, create the Release
+  id-token: write # mint the OIDC token that assumes the AWS role (no stored keys)
 
 jobs:
   release:
@@ -96,25 +99,32 @@ jobs:
       #                       (never beta), same rule as the `latest` dist-tag; its
       #                       CloudFront path is invalidated so the move is prompt.
       #
-      # One-time setup: repo secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (an IAM
-      # user scoped to PutObject on the bucket + CreateInvalidation on the distro) +
-      # variables AWS_REGION, CDN_S3_BUCKET, CDN_CF_DISTRIBUTION_ID. Until they exist
-      # this step SKIPS with a warning — npm already published (immutable), so failing
-      # here would be misleading.
+      # One-time setup: variable AWS_ROLE_ARN (an IAM role assumed via GitHub OIDC —
+      # NO stored AWS keys), plus AWS_REGION, CDN_S3_BUCKET, CDN_CF_DISTRIBUTION_ID.
+      # Until they exist the CDN step SKIPS with a warning — npm already published
+      # (immutable), so failing here would be misleading.
+      #
+      # OIDC: GitHub mints a short-lived token, the role's trust policy checks it comes
+      # from THIS repo, and STS hands back 15-minute credentials. Nothing long-lived is
+      # stored. The `if:` gate skips the assume-role when the role isn't configured yet,
+      # so a fresh repo still runs the release (just without the CDN upload).
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ vars.AWS_ROLE_ARN != '' && vars.CDN_S3_BUCKET != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
       - name: Publish inapp.js to CDN (S3 + CloudFront)
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
           S3_BUCKET: ${{ vars.CDN_S3_BUCKET }}
           CF_DISTRIBUTION_ID: ${{ vars.CDN_CF_DISTRIBUTION_ID }}
+          ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
           VERSION: ${{ steps.v.outputs.version }}
           DIST_TAG: ${{ steps.v.outputs.dist_tag }}
         run: |
           set -euo pipefail
-          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] \
-             || [ -z "${S3_BUCKET:-}" ]; then
-            echo "::warning::CDN not configured (need AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY secrets + CDN_S3_BUCKET variable) — skipping CDN upload. npm publish already succeeded."
+          if [ -z "${ROLE_ARN:-}" ] || [ -z "${S3_BUCKET:-}" ]; then
+            echo "::warning::CDN not configured (need AWS_ROLE_ARN + CDN_S3_BUCKET variables) — skipping CDN upload. npm publish already succeeded."
             exit 0
           fi
           CT="text/javascript; charset=utf-8"

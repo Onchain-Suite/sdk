@@ -87,10 +87,44 @@ GoDaddy's Name field takes the host only; strip the trailing `.onchainsuite.com`
 value shows. Validation usually completes minutes after the record resolves; CloudFront
 then serves `https://cdn.onchainsuite.com/…`.
 
-## Give CI write access
+## Give CI write access — GitHub OIDC (recommended, no stored keys)
 
-Create an IAM user (or role) for the release workflow, with least-privilege on exactly
-this bucket + distribution:
+The workflow assumes an IAM role via **GitHub OIDC**: GitHub mints a short-lived token,
+AWS STS checks it came from *this* repo, and hands back 15-minute credentials. Nothing
+long-lived is stored as a secret. `oidc.tf` provisions the OIDC provider, the role, its
+repo-scoped trust policy, and the least-privilege policy (s3:PutObject on the bucket +
+cloudfront:CreateInvalidation on the distribution). It's applied together with `main.tf`.
+
+```bash
+terraform output github_actions_role_arn      # -> repo variable AWS_ROLE_ARN
+```
+
+Then in this repo → Settings → Secrets and variables → Actions → **Variables** (all
+variables, no secrets except NPM_TOKEN):
+
+| Kind     | Name                      | Value                              |
+|----------|---------------------------|------------------------------------|
+| variable | `AWS_ROLE_ARN`            | `github_actions_role_arn` output   |
+| variable | `AWS_REGION`              | the bucket's region (e.g. `us-east-1`) |
+| variable | `CDN_S3_BUCKET`           | `onchainsuite-cdn`                 |
+| variable | `CDN_CF_DISTRIBUTION_ID`  | the distribution id                |
+| secret   | `NPM_TOKEN`               | npm Automation token (npm half)    |
+
+Until `AWS_ROLE_ARN` + `CDN_S3_BUCKET` exist, the workflow's CDN step skips with a
+warning instead of failing. The trust policy is locked to `refs/heads/main` by default
+(`github_allowed_sub` in `oidc.tf`) — widen it there if you ever release from tags or a
+GitHub environment.
+
+> **Already have GitHub's OIDC provider in this AWS account?** There can only be one.
+> Delete the `aws_iam_openid_connect_provider.github` resource in `oidc.tf` and point the
+> role's `Federated` principal at the existing provider ARN.
+
+<details><summary>Static-keys alternative (no OIDC)</summary>
+
+If you'd rather use a long-lived IAM user: attach this policy to a user, and in the
+workflow replace the "Configure AWS credentials (OIDC)" step with the standard
+`env: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY` from secrets (and drop `id-token:
+write`). OIDC is preferred — no key to leak or rotate.
 
 ```json
 {
@@ -101,20 +135,7 @@ this bucket + distribution:
   ]
 }
 ```
-
-Then in this repo → Settings → Secrets and variables → Actions:
-
-| Kind     | Name                      | Value                              |
-|----------|---------------------------|------------------------------------|
-| secret   | `AWS_ACCESS_KEY_ID`       | the IAM user's key                 |
-| secret   | `AWS_SECRET_ACCESS_KEY`   | the IAM user's secret              |
-| variable | `AWS_REGION`              | the bucket's region (e.g. `us-east-1`) |
-| variable | `CDN_S3_BUCKET`           | `onchainsuite-cdn`                 |
-| variable | `CDN_CF_DISTRIBUTION_ID`  | the distribution id                |
-
-(Plus `NPM_TOKEN` for the npm half.) Until these exist the workflow's CDN step skips with
-a warning instead of failing. *Upgrade path:* swap the static keys for GitHub OIDC → an
-IAM role (`aws-actions/configure-aws-credentials`) when you want no long-lived keys.
+</details>
 
 ## Seed it now, and test in prod immediately
 
