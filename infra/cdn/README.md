@@ -60,6 +60,21 @@ a CloudFront distribution with **Origin Access Control** (bucket stays private),
 `nosniff` + `Cross-Origin-Resource-Policy`), and a bucket policy that lets only this
 distribution read.
 
+### Remote state (S3) — do this before a second person touches it
+
+`backend.tf` keeps Terraform state in S3 with S3-native locking (no DynamoDB), so state
+isn't stranded on one laptop and two applies can't collide. The state bucket has to exist
+first, so bootstrap it once, then migrate the local state up:
+
+```bash
+./bootstrap-state.sh              # creates onchainsuite-tf-state (versioned/encrypted/private)
+terraform init -migrate-state     # answer "yes" to copy existing local state to S3
+```
+
+State can contain secrets, so it's never committed (`.gitignore`) and the bucket is
+private + encrypted. After migration, `terraform.tfstate` on disk is no longer
+authoritative.
+
 <details><summary>Console equivalent (if you'd rather click)</summary>
 
 1. **S3** → create bucket `onchainsuite-cdn`, **Block all public access ON** (it stays
@@ -99,8 +114,8 @@ cloudfront:CreateInvalidation on the distribution). It's applied together with `
 terraform output github_actions_role_arn      # -> repo variable AWS_ROLE_ARN
 ```
 
-Then in this repo → Settings → Secrets and variables → Actions → **Variables** (all
-variables, no secrets except NPM_TOKEN):
+Then in this repo → Settings → Secrets and variables → Actions → **Variables** —
+**all variables, zero secrets** (the npm half also uses OIDC, see below):
 
 | Kind     | Name                      | Value                              |
 |----------|---------------------------|------------------------------------|
@@ -108,12 +123,29 @@ variables, no secrets except NPM_TOKEN):
 | variable | `AWS_REGION`              | the bucket's region (e.g. `us-east-1`) |
 | variable | `CDN_S3_BUCKET`           | `onchainsuite-cdn`                 |
 | variable | `CDN_CF_DISTRIBUTION_ID`  | the distribution id                |
-| secret   | `NPM_TOKEN`               | npm Automation token (npm half)    |
 
 Until `AWS_ROLE_ARN` + `CDN_S3_BUCKET` exist, the workflow's CDN step skips with a
 warning instead of failing. The trust policy is locked to `refs/heads/main` by default
 (`github_allowed_sub` in `oidc.tf`) — widen it there if you ever release from tags or a
 GitHub environment.
+
+### npm publishing — Trusted Publishing (OIDC, no NPM_TOKEN)
+
+The npm half publishes over OIDC too — no token to store or rotate (npm is
+[restricting bypass-2FA tokens](https://gh.io/npm-gat-bypass2fa-deprecation), so this is
+the future-proof path). One-time, on npmjs.com:
+
+1. Package `@onchainsuite/sdk` → **Settings → Publishing access → Trusted Publisher →
+   Add GitHub Actions**.
+2. Fill in: **Organization/User** `onchainsuite`, **Repository** `sdk`, **Workflow
+   filename** `release.yml` (environment blank).
+3. Save. That's it — no `NPM_TOKEN` secret anywhere. The workflow already has
+   `id-token: write` and bumps npm to a version that supports OIDC; `npm publish` then
+   exchanges the GitHub token for a short-lived npm credential and attaches provenance.
+
+> Trusted Publishing requires the package to already exist on npm (it does — `0.3.0` is
+> published). If you ever move to a brand-new package name, do the first publish manually,
+> then add the Trusted Publisher.
 
 > **Already have GitHub's OIDC provider in this AWS account?** There can only be one.
 > Delete the `aws_iam_openid_connect_provider.github` resource in `oidc.tf` and point the

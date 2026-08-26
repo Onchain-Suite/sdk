@@ -15,8 +15,10 @@ name: Release
 #   S3 + CloudFront — for the no-build <script> loader the dashboard hands out;
 #                    served from cdn.onchainsuite.com, a host WE control (see below).
 #
-# One-time setup:
-#   - secret `NPM_TOKEN`               npm "Automation" token, publish rights to @onchainsuite
+# One-time setup (NO stored credentials — both halves publish via GitHub OIDC):
+#   - npm: configure a Trusted Publisher on npmjs.com for @onchainsuite/sdk →
+#          GitHub Actions, org `onchainsuite`, repo `sdk`, workflow `release.yml`.
+#          No NPM_TOKEN. (Package settings → Publishing access → Trusted Publisher.)
 #   - variable `AWS_ROLE_ARN`          IAM role assumed via GitHub OIDC — NO stored AWS
 #                                      keys. Scoped to s3:PutObject on the bucket +
 #                                      cloudfront:CreateInvalidation on the distro.
@@ -53,16 +55,13 @@ jobs:
           node-version: 20
           cache: npm
           registry-url: "https://registry.npmjs.org"
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 20 ships an older npm.
+      - run: npm install -g npm@latest
       - run: npm ci
       # Full gate BEFORE we bump/publish, so a bad build never reaches npm.
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - name: Fail if NPM_TOKEN is missing
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          [ -n "$NPM_TOKEN" ] || { echo "::error::Set the NPM_TOKEN repo secret first"; exit 1; }
       - name: Configure git identity
         run: |
           git config user.name  "github-actions[bot]"
@@ -78,10 +77,12 @@ jobs:
             echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Publish to npm
+      # Publish via npm Trusted Publishing (OIDC) — no NPM_TOKEN. The id-token
+      # permission (above) lets npm exchange a GitHub OIDC token for a short-lived
+      # publish credential, and it attaches build provenance automatically. Requires
+      # the Trusted Publisher to be configured on npmjs.com (see header + README).
+      - name: Publish to npm (Trusted Publishing / OIDC)
         run: npm publish --access public --tag "${{ steps.v.outputs.dist_tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Serve the browser loader (dist/inapp.js) from OUR OWN CDN, not a public npm
       # CDN. cdn.onchainsuite.com is CloudFront in front of this S3 bucket, so the
       # dashboard install snippet loads a file WE control: our uptime, our CSP origin,
