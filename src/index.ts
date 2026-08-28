@@ -5,6 +5,7 @@ import {
   unsubscribeFromPush,
 } from "./push";
 import { createToastRenderer, type ToastRenderer } from "./renderer.js";
+import { base58encode } from "./base58.js";
 import type {
   ClientEvent,
   Eip1193Provider,
@@ -430,17 +431,54 @@ export class OnchainSuite {
   }
 
   private async sign(message: string, wallet: string): Promise<string> {
+    // A custom signer wins for BOTH chains — this is how wagmi, Privy, Dynamic, or
+    // a Solana wallet-adapter plug in (and how WalletConnect works at all).
     if (this.opts.signMessage) return this.opts.signMessage(message, wallet);
+
+    // Otherwise route by chain family. EVM (`0x…`) → EIP-191 personal_sign via an
+    // injected EIP-1193 provider; SVM (Solana) → ed25519 via the injected Solana
+    // wallet, serialized to base58.
+    if (!/^0x/i.test(wallet.trim())) return this.signSvm(message);
+
     const provider = this.getProvider();
     if (!provider)
       throw new Error(
-        "No signer available — pass `signMessage` or an EIP-1193 `provider`."
+        "No EVM signer — pass `signMessage` or an EIP-1193 `provider`."
       );
     const sig = await provider.request({
       method: "personal_sign",
       params: [message, wallet],
     });
     return String(sig);
+  }
+
+  /**
+   * Sign the challenge with an injected Solana wallet (Phantom, Backpack, …). The
+   * wallet returns a raw 64-byte ed25519 signature; we base58-encode it, which is
+   * what the backend decodes and verifies against the base58 pubkey (the address).
+   */
+  private async signSvm(message: string): Promise<string> {
+    type SolanaSigner = {
+      signMessage?: (
+        m: Uint8Array,
+        enc?: string
+      ) => Promise<{ signature: Uint8Array } | Uint8Array>;
+    };
+    const w = globalThis as unknown as {
+      solana?: SolanaSigner;
+      phantom?: { solana?: SolanaSigner };
+    };
+    const solana = w.solana ?? w.phantom?.solana;
+    if (!solana?.signMessage)
+      throw new Error(
+        "No Solana signer — pass `signMessage` or connect a Solana wallet (window.solana)."
+      );
+    const encoded = new TextEncoder().encode(message);
+    const res = await solana.signMessage(encoded, "utf8");
+    const raw = (res as { signature?: Uint8Array })?.signature ?? (res as Uint8Array);
+    return base58encode(
+      raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayLike<number>)
+    );
   }
 
   private async discoverWallet(): Promise<string | undefined> {
