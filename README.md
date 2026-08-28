@@ -177,7 +177,7 @@ auto-inits `window.onchainsuite`:
 <script>
   // `window.onchainsuite` is a ready instance — start it once a wallet connects:
   document.querySelector("#connect").onclick = () =>
-    window.onchainsuite.start(/* walletAddress?, or omit to prompt window.ethereum */);
+    window.onchainsuite.start(/* walletAddress?, or omit to auto-detect an injected wallet */);
   window.onchainsuite.on("notification", (n) => console.log(n));
 </script>
 ```
@@ -214,10 +214,21 @@ finds `window.io`):
 const os = new OnchainSuite("pk_live_...", {
   apiBaseUrl: "https://api.onchainsuite.com",
 });
-await os.start(); // prompts window.ethereum to connect + sign
+await os.start(); // discovers a browser-extension wallet and prompts it to sign
 ```
 
-### 2. Bring your own signer (wagmi / viem / ethers)
+The zero-config path auto-detects **injected** wallets: EVM via EIP-6963
+(MetaMask, Rabby, Coinbase, Brave, Zerion, Frame — it picks the wallet that
+holds your address, or the one already connected, rather than guessing
+`window.ethereum`), then Solana (Phantom, Solflare, Backpack, Glow). Pass an
+address to `start(address)` to skip discovery.
+
+### 2. Bring your own signer (wagmi / WalletConnect / Privy / Dynamic / Solana adapter)
+
+`signMessage` is the universal path — it works for **every** wallet, including
+ones that don't inject (WalletConnect, Privy, Dynamic, Coinbase Wallet SDK,
+smart/AA wallets, Solana wallet-adapter). Your connector signs; the SDK never
+touches the wallet.
 
 ```ts
 const os = new OnchainSuite("pk_live_...", {
@@ -323,8 +334,8 @@ In-App**.
 | Option           | Type                               | Default           | Notes                                               |
 | ---------------- | ---------------------------------- | ----------------- | --------------------------------------------------- |
 | `apiBaseUrl`     | `string`                           | same-origin       | API host, no `/api/v1`.                             |
-| `signMessage`    | `(msg, wallet) => Promise<string>` | `window.ethereum` | Custom signer.                                      |
-| `provider`       | EIP-1193                           | `window.ethereum` | Wallet provider for the default signer.             |
+| `signMessage`    | `(msg, wallet) => Promise<string>` | injected wallet   | Custom signer — the universal path (WalletConnect / Privy / Dynamic / Solana adapter). |
+| `provider`       | EIP-1193                           | EIP-6963 / `window.ethereum` | Force a specific EVM provider; else auto-discovered. |
 | `display`        | `DisplayOptions \| false`          | enabled           | `false` = headless. See table below.                |
 | `onNotification` | `(n, actions) => boolean \| void`  | —                 | Custom handler; return `false` to skip built-in UI. |
 | `ioClient`       | `io` factory                       | auto              | Provide socket.io-client's `io` explicitly.         |

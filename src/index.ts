@@ -5,7 +5,13 @@ import {
   unsubscribeFromPush,
 } from "./push";
 import { createToastRenderer, type ToastRenderer } from "./renderer.js";
-import { base58encode } from "./base58.js";
+import { resolveInjectedEvmProvider } from "./eip6963.js";
+import {
+  getSolanaProvider,
+  connectSolana,
+  signWithSolana,
+  type SolanaProvider,
+} from "./solana.js";
 import type {
   ClientEvent,
   Eip1193Provider,
@@ -64,6 +70,9 @@ export class OnchainSuite {
 
   private socket: MinimalSocket | null = null;
   private walletAddress: string | null = null;
+  /** Resolved once per session so discovery and signing use the SAME wallet. */
+  private evmProvider?: Eip1193Provider;
+  private solanaProvider?: SolanaProvider;
   /** Kept after auth: push registration uses the same session as the socket. */
   private sessionToken: string | null = null;
   /**
@@ -90,8 +99,9 @@ export class OnchainSuite {
 
   /**
    * Authenticate a wallet and start receiving notifications. If `walletAddress`
-   * is omitted, the injected wallet (window.ethereum) is prompted to connect and
-   * sign. Resolves once connected.
+   * is omitted, an injected wallet is discovered and prompted to connect and
+   * sign — EVM via EIP-6963 (falling back to `window.ethereum`), then Solana
+   * (Phantom / Solflare / Backpack / Glow). Resolves once connected.
    */
   async start(walletAddress?: string): Promise<void> {
     const wallet = (walletAddress ?? (await this.discoverWallet()))?.trim();
@@ -120,6 +130,9 @@ export class OnchainSuite {
     }
     this.socket = null;
     this.sessionToken = null;
+    // Forget the resolved wallets so a reconnect can pick a different one.
+    this.evmProvider = undefined;
+    this.solanaProvider = undefined;
     this.seen.clear();
     this.renderer?.destroy();
   }
@@ -440,7 +453,8 @@ export class OnchainSuite {
     // wallet, serialized to base58.
     if (!/^0x/i.test(wallet.trim())) return this.signSvm(message);
 
-    const provider = this.getProvider();
+    // Pass the address so 6963 can pick the wallet that actually holds it.
+    const provider = await this.resolveEvmProvider(wallet);
     if (!provider)
       throw new Error(
         "No EVM signer — pass `signMessage` or an EIP-1193 `provider`."
@@ -453,47 +467,58 @@ export class OnchainSuite {
   }
 
   /**
-   * Sign the challenge with an injected Solana wallet (Phantom, Backpack, …). The
-   * wallet returns a raw 64-byte ed25519 signature; we base58-encode it, which is
-   * what the backend decodes and verifies against the base58 pubkey (the address).
+   * Sign the challenge with an injected Solana wallet (Phantom, Solflare,
+   * Backpack, Glow). Reuses the wallet discovery already resolved, so the wallet
+   * that connected is the one that signs.
    */
   private async signSvm(message: string): Promise<string> {
-    type SolanaSigner = {
-      signMessage?: (
-        m: Uint8Array,
-        enc?: string
-      ) => Promise<{ signature: Uint8Array } | Uint8Array>;
-    };
-    const w = globalThis as unknown as {
-      solana?: SolanaSigner;
-      phantom?: { solana?: SolanaSigner };
-    };
-    const solana = w.solana ?? w.phantom?.solana;
-    if (!solana?.signMessage)
+    const provider = this.solanaProvider ?? getSolanaProvider();
+    if (!provider)
       throw new Error(
-        "No Solana signer — pass `signMessage` or connect a Solana wallet (window.solana)."
+        "No Solana signer — pass `signMessage` or connect a Solana wallet (Phantom, Solflare, …)."
       );
-    const encoded = new TextEncoder().encode(message);
-    const res = await solana.signMessage(encoded, "utf8");
-    const raw = (res as { signature?: Uint8Array })?.signature ?? (res as Uint8Array);
-    return base58encode(
-      raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayLike<number>)
-    );
+    this.solanaProvider = provider;
+    return signWithSolana(provider, message);
   }
 
   private async discoverWallet(): Promise<string | undefined> {
-    const provider = this.getProvider();
-    if (!provider) return undefined;
-    const accounts = (await provider.request({
-      method: "eth_requestAccounts",
-    })) as string[] | undefined;
-    return Array.isArray(accounts) ? accounts[0] : undefined;
+    // Prefer an injected EVM wallet (the common case), then a Solana wallet.
+    const evm = await this.resolveEvmProvider();
+    if (evm) {
+      try {
+        const accounts = (await evm.request({
+          method: "eth_requestAccounts",
+        })) as string[] | undefined;
+        if (Array.isArray(accounts) && accounts[0]) return accounts[0];
+      } catch {
+        /* user rejected, or this wallet has no EVM account — try Solana */
+      }
+    }
+    const sol = getSolanaProvider();
+    if (sol) {
+      this.solanaProvider = sol;
+      const addr = await connectSolana(sol).catch(() => undefined);
+      if (addr) return addr;
+    }
+    return undefined;
   }
 
-  private getProvider(): Eip1193Provider | undefined {
-    if (this.opts.provider) return this.opts.provider;
-    const w = globalThis as unknown as { ethereum?: Eip1193Provider };
-    return w.ethereum;
+  /**
+   * Resolve (and cache) the injected EVM provider to sign with. Honours an
+   * explicit `provider`; otherwise uses EIP-6963 discovery, preferring the wallet
+   * that holds `preferAddress` or one already connected, and falling back to
+   * `window.ethereum`. Cached so discovery runs once per session.
+   */
+  private async resolveEvmProvider(
+    preferAddress?: string
+  ): Promise<Eip1193Provider | undefined> {
+    if (this.evmProvider) return this.evmProvider;
+    const provider = await resolveInjectedEvmProvider({
+      explicit: this.opts.provider,
+      preferAddress,
+    });
+    if (provider) this.evmProvider = provider;
+    return provider;
   }
 
   private async resolveIo(): Promise<IoFactory> {
