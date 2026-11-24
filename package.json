@@ -1,7 +1,7 @@
 {
   "name": "@onchainsuite/sdk",
   "version": "0.5.0",
-  "description": "In-app, web push and mobile push notifications for any dApp — wallet-authenticated, real-time, and lightweight.",
+  "description": "In-app, web push and mobile push notifications for any dApp — plus a server-side transactional Email API client.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
     },
     "./inapp.js": "./dist/inapp.js"
   },
@@ -47,7 +51,9 @@
     "push",
     "notifications",
     "wallet",
-    "sdk"
+    "sdk",
+    "email",
+    "transactional-email"
   ],
   "license": "MIT",
   "dependencies": {
