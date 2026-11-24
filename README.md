@@ -3,6 +3,9 @@
 Dead-simple in-app push notifications for any dApp. Wallet-authenticated,
 real-time, and tiny. Built-in toast UI you can fully restyle or render your own.
 
+Also: a server-side client for transactional email, to addresses or wallets.
+See [Transactional email (server)](#transactional-email-server).
+
 ```ts
 import { OnchainSuite } from "@onchainsuite/sdk";
 
@@ -275,6 +278,202 @@ await fetch("https://api.onchainsuite.com/api/v1/inapp/push", {
 
 The recipient's dApp (running the SDK from **Usage** above) receives it in real
 time — or on next connect if they're offline.
+
+## Transactional email (server)
+
+`@onchainsuite/sdk/server` is a server-side client for the Email API: receipts,
+sign-in links, alerts, sent from your own verified domain, to an email address
+or to a wallet. It authenticates with a **secret** key, so it is a separate
+entry point that the browser build never imports. Node 18+ (or Deno, Bun, an
+edge runtime: anything with `fetch`). No extra dependencies.
+
+```ts
+import { OnchainSuiteServer } from "@onchainsuite/sdk/server";
+
+const onchain = new OnchainSuiteServer(process.env.ONCHAINSUITE_API_KEY); // sk_live_… / sk_test_…
+
+const { id } = await onchain.emails.send(
+  {
+    from: "Acme <receipts@acme.xyz>",
+    to: "ada@example.com",
+    subject: "Your receipt",
+    html: "<p>Thanks for your order.</p>",
+    tags: [{ name: "kind", value: "receipt" }],
+  },
+  { idempotencyKey: `receipt-${order.id}` },
+);
+```
+
+`new OnchainSuiteServer()` with no argument reads `ONCHAINSUITE_API_KEY`. A
+`sk_test_` key runs every check and stores the email but sends nothing; the
+recipients move straight to `delivered`, and the webhooks fire with
+`environment: "test"`. Constructing the client with an `sk_live_` key in a
+browser throws: anyone who opens the page could read the key and send mail as you.
+
+### Send later
+
+```ts
+const { id } = await onchain.emails.send({
+  from: "Acme <hello@acme.xyz>",
+  to: "ada@example.com",
+  subject: "Your trial ends tomorrow",
+  text: "…",
+  scheduled_at: new Date(Date.now() + 24 * 3600_000), // or "2026-11-25T09:30:00Z"
+});
+
+await onchain.emails.update(id, { scheduled_at: "2026-11-25T12:00:00Z" }); // reschedule
+await onchain.emails.cancel(id); // nothing is sent
+```
+
+Up to 72 hours ahead. A string must carry an offset (`Z` or `+01:00`); a
+local time with no offset is refused rather than guessed. Once an email has
+been released for sending, `update` and `cancel` fail with
+`EMAIL_NOT_SCHEDULED`.
+
+### Send to a wallet
+
+```ts
+await onchain.emails.send({
+  from: "Acme <alerts@acme.xyz>",
+  to: "0x4b2f…c91a", // EVM (any casing) or a Solana address
+  subject: "Your position is close to liquidation",
+  text: "…",
+});
+```
+
+The email goes to the address that wallet's owner shared with your workspace.
+You never see that address: `get`, `list` and webhooks show the wallet. A
+wallet must be the only recipient (a Cc would expose its address), so to reach
+several wallets use `batch`. If the owner has not shared an email, the send
+fails with `RECIPIENT_NOT_RESOLVABLE` and nothing is stored. Name-service
+recipients (`vitalik.eth`, `toly.sol`) currently fail with
+`RECIPIENT_TYPE_NOT_SUPPORTED_YET`; the client passes them through unchanged
+so they will work as soon as the API resolves them.
+
+### Batch, look up, list
+
+```ts
+const ids = await onchain.emails.batch(
+  wallets.map((w) => ({ from: "Acme <alerts@acme.xyz>", to: w, subject: "GM", text: "…" })),
+  { idempotencyKey: `drop-${dropId}` },
+); // 1–100 emails, all accepted or none; ids in request order
+
+const email = await onchain.emails.get(id);
+email.status; // "queued" | "scheduled" | "sent" | "delivered" | "partially_failed" | "failed" | …
+email.recipients; // per-recipient status
+email.events; // sent / delivered / bounced / …, oldest first
+
+// One page
+const page = await onchain.emails.list({ status: "failed", limit: 50 });
+page.data; page.has_more; page.next_cursor; // pass next_cursor back as `cursor`
+
+// Or every match, fetching pages as you go
+for await (const e of onchain.emails.listAll({
+  environment: "live",
+  created_after: new Date(Date.now() - 7 * 86400_000),
+  wallet: "0x4b2f…c91a",
+})) {
+  console.log(e.id, e.status);
+}
+```
+
+`list` filters: `limit`, `cursor`, `status`, `environment`, `created_after`,
+`created_before` (ISO string or `Date`), `tag`, `wallet`.
+
+### Errors
+
+Every failure rejects with an `OnchainSuiteError`:
+
+```ts
+import { OnchainSuiteError } from "@onchainsuite/sdk/server";
+
+try {
+  await onchain.emails.send(email);
+} catch (err) {
+  if (err instanceof OnchainSuiteError) {
+    err.code;       // "DOMAIN_NOT_VERIFIED", "RATE_LIMITED", "VALIDATION_FAILED", …
+    err.status;     // HTTP status (0 = no response: NETWORK_ERROR / TIMEOUT)
+    err.details;    // e.g. { field: "subject" }, { index: 3 } in a batch
+    err.retryAfter; // seconds, on a 429
+    err.requestId;  // quote this to support
+  }
+}
+```
+
+Branch on `code`, never on `message`. The full list of codes is in the Email
+API reference.
+
+### Retries, and why a POST is not retried by default
+
+The client retries up to `maxRetries` times (default 2) with exponential
+backoff, waiting `Retry-After` when the API gives one. What it retries depends
+on whether repeating the request could send the email twice:
+
+- **429** is always retried. The API rate-limits before it stores anything,
+  so a refused request left nothing behind.
+- **5xx, a timeout or a dropped connection** is ambiguous: the API may have
+  stored and queued the email and then failed to answer. Repeating that
+  `POST` would send it again. So these are retried for `get`, `list` and
+  `update`, and for `send`/`batch` **only when you pass an `idempotencyKey`**.
+  With a key, a repeat is safe: the API answers with the original id and
+  sends nothing new.
+
+So pass an `idempotencyKey` on every send that matters, derived from your own
+record (`receipt-${order.id}`), never from a random value made per attempt.
+That makes your own retries (a job queue re-running a handler) safe too.
+
+A `Retry-After` longer than `maxRetryDelayMs` (default 60 s), such as
+`DAILY_LIMIT_EXCEEDED`, which resets at 00:00 UTC, is not slept on: you get
+the error with `retryAfter` set and decide what to do.
+
+| Option            | Default                                 |                                       |
+| ----------------- | --------------------------------------- | ------------------------------------- |
+| `baseUrl`         | `https://api.onchainsuite.com/api/v1`   |                                       |
+| `maxRetries`      | `2`                                     | `0` turns retrying off.               |
+| `maxRetryDelayMs` | `60000`                                 | Longest single wait.                  |
+| `timeoutMs`       | `30000`                                 | Per attempt.                          |
+| `fetch`           | global `fetch`                          | Custom transport (tests, proxies).    |
+
+### Verify webhooks
+
+Subscribe an endpoint to the `email.*` topics (`email.sent`,
+`email.delivered`, `email.delivery_delayed`, `email.bounced`,
+`email.complained`, `email.failed`, `email.suppressed`) in **Settings →
+Integrations**, then verify each delivery against its **raw** body before
+you trust it:
+
+```ts
+import express from "express";
+import { verifyWebhook, WebhookVerificationError } from "@onchainsuite/sdk/server";
+
+app.post(
+  "/webhooks/onchainsuite",
+  express.raw({ type: "application/json" }), // the raw bytes, not parsed JSON
+  async (req, res) => {
+    let event;
+    try {
+      event = await verifyWebhook(req.body, req.headers, process.env.ONCHAINSUITE_WEBHOOK_SECRET!);
+    } catch (err) {
+      if (err instanceof WebhookVerificationError) return res.sendStatus(400);
+      throw err;
+    }
+    if (event.type === "email.bounced" && event.data.bounce?.type === "hard") {
+      await markUndeliverable(event.data.to);
+    }
+    res.sendStatus(200); // answer quickly; do slow work after
+  },
+);
+```
+
+In a Fetch-style handler (Next.js route, Hono, Workers):
+`await verifyWebhook(await req.text(), req.headers, secret)`.
+
+`verifyWebhook` checks `X-OnChain-Signature` (`t=<unix seconds>,v1=<hex>`,
+HMAC-SHA256 of `"<t>.<raw body>"` with the endpoint secret) using a
+constant-time comparison, rejects a timestamp more than 5 minutes from now
+(`{ toleranceSeconds }` to change it), and returns the parsed event. Parse
+first and re-serialise, and the bytes no longer match. Deliveries are retried
+on a non-2xx and can repeat, so dedupe on `email_id` + `recipient_id` + `type`.
 
 ## Make it yours — display is fully flexible
 
