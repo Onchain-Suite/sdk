@@ -17,6 +17,10 @@
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
     },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "import": "./dist/identity/index.js"
+    },
     "./inapp.js": "./dist/inapp.js"
   },
   "repository": {
@@ -53,10 +57,12 @@
     "wallet",
     "sdk",
     "email",
-    "transactional-email"
+    "transactional-email",
+    "identity"
   ],
   "license": "MIT",
   "dependencies": {
+    "poseidon-lite": "^0.3.0",
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
