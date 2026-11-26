@@ -475,6 +475,50 @@ constant-time comparison, rejects a timestamp more than 5 minutes from now
 first and re-serialise, and the bytes no longer match. Deliveries are retried
 on a non-2xx and can repeat, so dedupe on `email_id` + `recipient_id` + `type`.
 
+## Bind a wallet to an email (identity)
+
+`@onchainsuite/sdk/identity` links a wallet to a verified email, so mail you
+send "to a wallet" reaches its owner. It has its own entry point, so in-app
+users don't ship it.
+
+```ts
+import { IdentityClient } from "@onchainsuite/sdk/identity";
+
+const id = new IdentityClient("pk_live_...", {
+  apiBaseUrl: "https://api.onchainsuite.com",
+  organizationId: "org_...", // only needed with `prove`
+});
+
+await id.requestEmailCode({ walletAddress, email });
+// …the user types the code from their inbox…
+await id.bindEmail({
+  walletAddress,
+  email,
+  otp,
+  signMessage: (message, wallet) => signer.signMessage(message), // one wallet prompt
+  prove, // optional: your Semaphore generateProof wrapper, if your org requires proofs
+});
+```
+
+The server accepts a bind only when three proofs agree on the same wallet and
+address:
+
+- **The wallet signs the bind**, over
+  `Bind <channel> channel <valueHash> for wallet <address> to identity <commitment>`.
+  The value hash is in the message, so the signature can't be reused to bind a
+  different address. `bindEmail` builds this message for you;
+  `identityBindMessage` and `computeValueHash` are exported if you sign
+  elsewhere.
+- **The email code** works only for the address it was sent to, once, within
+  10 minutes and 5 attempts.
+- **A Semaphore membership proof**, when your org requires one (the server
+  default). This package doesn't bundle the circuits: pass `prove`, which
+  receives the exact `message` and `scope` to give `generateProof`.
+
+The wallet must be registered first (`POST /identity/register`). Errors
+throw `IdentityError`, whose `code` is the server's error, e.g.
+`OTP_DESTINATION_MISMATCH` or `SIGNATURE_MISMATCH`.
+
 ## Make it yours — display is fully flexible
 
 Everything about the built-in UI is overridable. Change timing, position, colors,
